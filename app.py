@@ -1,4 +1,5 @@
-import base64, io, json, os, socket, zipfile
+import base64, io, json, os, socket, zipfile, re
+from datetime import datetime
 from ipaddress import ip_address
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
@@ -7,6 +8,9 @@ import httpx
 import streamlit as st
 import trafilatura
 from openai import OpenAI
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build as google_build
+from googleapiclient.http import MediaIoBaseUpload
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 st.set_page_config(page_title="neryp_bot", page_icon="📰", layout="wide")
@@ -35,6 +39,50 @@ def api_key_from_secrets():
     except Exception:
         key = ""
     return key or os.getenv("OPENAI_API_KEY", "")
+
+DRIVE_ROOT_FOLDER_ID = "1pCEHZRJ4104-EtpDAgWz4LpNpWfpkmPS"
+DRIVE_SCOPE = ["https://www.googleapis.com/auth/drive"]
+
+def drive_service_from_secrets():
+    """Create a Drive client using an OAuth refresh token stored in Streamlit Secrets."""
+    try:
+        cfg = st.secrets.get("google_drive", {})
+        client_id = cfg.get("client_id", "")
+        client_secret = cfg.get("client_secret", "")
+        refresh_token = cfg.get("refresh_token", "")
+        root_id = cfg.get("folder_id", DRIVE_ROOT_FOLDER_ID)
+    except Exception:
+        client_id = client_secret = refresh_token = ""
+        root_id = DRIVE_ROOT_FOLDER_ID
+    if not (client_id and client_secret and refresh_token):
+        raise RuntimeError("Falta configurar la conexión de Google Drive en Streamlit Secrets.")
+    creds = Credentials(
+        token=None, refresh_token=refresh_token,
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=client_id, client_secret=client_secret, scopes=DRIVE_SCOPE
+    )
+    return google_build("drive", "v3", credentials=creds, cache_discovery=False), root_id
+
+def safe_folder_name(value):
+    value = re.sub(r"[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ-]+", "-", value or "carrusel")
+    value = re.sub(r"-+", "-", value).strip("-")[:65]
+    return value or "carrusel"
+
+def create_drive_folder(service, parent_id, name):
+    metadata = {"name": name, "mimeType": "application/vnd.google-apps.folder", "parents": [parent_id]}
+    folder = service.files().create(body=metadata, fields="id,name,webViewLink").execute()
+    return folder
+
+def upload_drive_bytes(service, parent_id, filename, data, mimetype):
+    media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mimetype, resumable=True)
+    metadata = {"name": filename, "parents": [parent_id]}
+    return service.files().create(body=metadata, media_body=media, fields="id,name,webViewLink").execute()
+
+def list_drive_carousels(service, root_id, limit=20):
+    q = f"'{root_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
+    result = service.files().list(q=q, pageSize=limit, orderBy="createdTime desc",
+        fields="files(id,name,webViewLink,createdTime)").execute()
+    return result.get("files", [])
 
 def validate_url(url):
     p = urlparse(url.strip())
@@ -146,21 +194,33 @@ def compose(bg, slide, article):
     d.text((88,1282),"IDEAS, CONTEXTO Y PERSPECTIVA",font=font(15,True),fill=(230,226,216,180))
     return im.convert("RGB")
 
-def build(url, key, status):
+def build(url, key, status, drive_service, drive_root_id):
     client=OpenAI(api_key=key)
     status.write("Leyendo el artículo…"); article=read_article(url)
     status.write("Analizando y construyendo la narrativa…"); plan=plan_article(client,article)
+    stamp=datetime.now().strftime("%Y-%m-%d_%H%M")
+    folder_name=f"{stamp}_{safe_folder_name(plan.get('carousel_title') or article.get('title'))}"
+    folder=create_drive_folder(drive_service,drive_root_id,folder_name)
+    folder_id=folder["id"]
+    folder_url=folder.get("webViewLink") or f"https://drive.google.com/drive/folders/{folder_id}"
     images=[]
     for i,slide in enumerate(plan["slides"],1):
         status.write(f"Generando imagen {i} de 5…")
         final=compose(make_bg(client,slide,article),slide,article)
         buf=io.BytesIO(); final.save(buf,format="PNG",optimize=True)
-        images.append((f"carrusel_{i}.png",buf.getvalue()))
+        data=buf.getvalue(); name=f"lamina_{i:02d}.png"
+        status.write(f"Guardando {name} en Google Drive…")
+        upload_drive_bytes(drive_service,folder_id,name,data,"image/png")
+        images.append((name,data))
+    copy_text=(plan.get("carousel_title","")+"\n\n"+plan.get("caption",""))
+    upload_drive_bytes(drive_service,folder_id,"copy_carrusel.txt",copy_text.encode("utf-8"),"text/plain")
     zipped=io.BytesIO()
     with zipfile.ZipFile(zipped,"w",zipfile.ZIP_DEFLATED) as z:
         for name,data in images: z.writestr(name,data)
-        z.writestr("copy_carrusel.txt",plan.get("carousel_title","")+"\n\n"+plan.get("caption",""))
-    return article,plan,images,zipped.getvalue()
+        z.writestr("copy_carrusel.txt",copy_text)
+    zip_data=zipped.getvalue()
+    upload_drive_bytes(drive_service,folder_id,"carrusel_completo.zip",zip_data,"application/zip")
+    return article,plan,images,zip_data,folder_url
 
 st.title("📰 neryp_bot")
 st.subheader("Generador de carruseles editoriales para Instagram")
@@ -179,9 +239,11 @@ if st.button("Generar carrusel",type="primary",use_container_width=True):
     else:
         status=st.status("Iniciando proceso…",expanded=True)
         try:
-            article,plan,images,zip_data=build(url.strip(),key,status)
-            status.update(label="Carrusel terminado",state="complete",expanded=False)
-            st.success("Se generaron las cinco láminas.")
+            drive_service, drive_root_id = drive_service_from_secrets()
+            article,plan,images,zip_data,folder_url=build(url.strip(),key,status,drive_service,drive_root_id)
+            status.update(label="Carrusel terminado y guardado en Google Drive",state="complete",expanded=False)
+            st.success("Las cinco láminas y los archivos complementarios ya están guardados en Drive.")
+            st.link_button("Abrir carpeta del carrusel en Google Drive",folder_url,use_container_width=True)
             st.subheader(plan.get("carousel_title","Tu carrusel"))
             if article.get("title"): st.caption("Artículo: "+article["title"])
             cols=st.columns(5)
@@ -196,9 +258,21 @@ if st.button("Generar carrusel",type="primary",use_container_width=True):
             with st.expander("Revisar la narrativa"): st.json(plan)
             if plan.get("editorial_warning"): st.warning(plan["editorial_warning"])
         except Exception as e:
-            status.update(label="No se pudo generar",state="error")
+            status.update(label="No se pudo completar el proceso",state="error")
             st.error(str(e))
+            st.info("Si el error ocurrió durante la generación, las láminas que ya se habían subido permanecen en Google Drive.")
             st.info("Algunos sitios bloquean la extracción o requieren JavaScript, login o suscripción.")
 
+with st.expander("📁 Historial de carruseles guardados en Drive"):
+    try:
+        drive_service, drive_root_id = drive_service_from_secrets()
+        folders=list_drive_carousels(drive_service,drive_root_id)
+        if not folders: st.caption("Todavía no hay carruseles guardados.")
+        for item in folders:
+            link=item.get("webViewLink") or f"https://drive.google.com/drive/folders/{item['id']}"
+            st.markdown(f"- [{item['name']}]({link})")
+    except Exception:
+        st.caption("Configura Google Drive en Streamlit Secrets para consultar el historial.")
+
 st.divider()
-st.caption("Los artículos deben ser públicos y accesibles. La aplicación no guarda una galería permanente.")
+st.caption("Los artículos deben ser públicos y accesibles. Cada imagen se guarda en Google Drive al terminar de generarse.")
