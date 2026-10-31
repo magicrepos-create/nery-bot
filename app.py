@@ -1,4 +1,4 @@
-import base64, io, json, os, socket, zipfile, re
+import base64, hashlib, io, json, os, socket, zipfile, re
 from datetime import datetime
 from ipaddress import ip_address
 from urllib.parse import urljoin, urlparse
@@ -158,9 +158,35 @@ def safe_folder_name(value):
     value = re.sub(r"-+", "-", value).strip("-")[:65]
     return value or "carrusel"
 
-def create_drive_folder(service, parent_id, name):
+def normalize_url(url):
+    """Misma URL aunque cambie www, mayúsculas del dominio, parámetros (?utm=...) o la diagonal final."""
+    p = urlparse(url.strip())
+    host = (p.hostname or "").lower().removeprefix("www.")
+    return f"{host}{p.path.rstrip('/')}"
+
+def url_key(url):
+    # appProperties de Drive admite valores cortos, así que se guarda un hash de la URL.
+    return hashlib.sha1(normalize_url(url).encode("utf-8")).hexdigest()
+
+def create_drive_folder(service, parent_id, name, source_url=None):
     metadata = {"name": name, "mimeType": "application/vnd.google-apps.folder", "parents": [parent_id]}
+    if source_url:
+        metadata["appProperties"] = {"src_url": url_key(source_url)}
+        metadata["description"] = f"Artículo: {source_url.strip()}"
     return service.files().create(body=metadata, fields="id,name,webViewLink").execute()
+
+def find_existing_carousels(service, root_id, url):
+    """Carpetas de carrusel (no eliminadas) generadas antes para la misma URL."""
+    q = (f"'{root_id}' in parents and mimeType='application/vnd.google-apps.folder' "
+         f"and trashed=false and appProperties has {{ key='src_url' and value='{url_key(url)}' }}")
+    result = service.files().list(q=q, orderBy="createdTime desc",
+        fields="files(id,name,webViewLink)").execute()
+    return result.get("files", [])
+
+def trash_drive_folders(service, folder_ids):
+    # Se mandan a la papelera de Drive (recuperables por 30 días), no se borran definitivamente.
+    for folder_id in folder_ids:
+        service.files().update(fileId=folder_id, body={"trashed": True}).execute()
 
 def upload_drive_bytes(service, parent_id, filename, data, mimetype):
     media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mimetype, resumable=True)
@@ -371,15 +397,20 @@ def make_slide(client, slide, brand, brand_key, refs, author, footer2):
     return png_bytes(add_logo(to_instagram(raw), brand, brand_key))
 
 # ---------------------------------------------------------------- Flujo principal
-def build(url, key, status, drive_service, drive_root_id):
+def build(url, key, status, bar, drive_service, drive_root_id):
+    def advance(pct, text):
+        bar.progress(pct, text=f"{text} · {pct}%")
+
     client = OpenAI(api_key=key)
     status.write("Identificando el medio y su identidad gráfica…")
     brand_key, brand = identify_brand(url)
     status.write(f"Leyendo el artículo de {brand['name']}…")
+    advance(3, "Leyendo el artículo")
     article = read_article(url)
     # Preferir el dominio real de la URL final, después de redirecciones.
     brand_key, brand = identify_brand(article.get("url", url))
     status.write(f"Analizando el artículo y preparando la narrativa…")
+    advance(6, "Preparando la narrativa")
     plan = plan_article(client, article, brand)
 
     author = (article.get("author") or "").strip()
@@ -389,16 +420,18 @@ def build(url, key, status, drive_service, drive_root_id):
 
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
     folder_name = f"{stamp}_{safe_folder_name(plan.get('carousel_title') or article.get('title'))}"
-    folder = create_drive_folder(drive_service, drive_root_id, folder_name)
+    folder = create_drive_folder(drive_service, drive_root_id, folder_name, source_url=url)
     folder_id = folder["id"]
     folder_url = folder.get("webViewLink") or f"https://drive.google.com/drive/folders/{folder_id}"
 
     images = []
     for i, slide in enumerate(plan["slides"], 1):
         status.write(f"Generando lámina {i} de 5…")
+        advance(10 + (i - 1) * 18, f"Generando lámina {i} de 5")
         data = make_slide(client, slide, brand, brand_key, refs, author, footer2)
         name = f"lamina_{i:02d}.png"
         status.write(f"Guardando {name} en Google Drive…")
+        advance(10 + i * 18, f"Lámina {i} de 5 lista")
         upload_drive_bytes(drive_service, folder_id, name, data, "image/png")
         images.append((name, data))
 
@@ -407,6 +440,7 @@ def build(url, key, status, drive_service, drive_root_id):
         for name, data in images:
             z.writestr(name, data)
     zip_data = zipped.getvalue()
+    advance(100, "Carrusel completo")
     return images, zip_data, folder_url
 
 # ---------------------------------------------------------------- Interfaz
@@ -420,36 +454,84 @@ with col_title:
     st.subheader("Generador de carruseles editoriales para Instagram")
     st.write("Pega la URL de un artículo y genera cinco imágenes listas para publicar.")
 
+def run_generation(url, key, replace_ids=()):
+    """Genera el carrusel; si sustituye, manda los anteriores a la papelera solo cuando el nuevo terminó bien."""
+    bar = st.progress(0, text="Iniciando · 0%")
+    status = st.status("Iniciando proceso…", expanded=True)
+    try:
+        drive_service, drive_root_id = drive_service_from_secrets()
+        images, zip_data, folder_url = build(url, key, status, bar, drive_service, drive_root_id)
+        if replace_ids:
+            status.write("Enviando el carrusel anterior a la papelera de Drive…")
+            trash_drive_folders(drive_service, replace_ids)
+        status.update(label="Carrusel terminado y guardado en Google Drive", state="complete", expanded=False)
+        st.success("Las cinco láminas ya están guardadas en Google Drive."
+                   + (" El carrusel anterior se envió a la papelera." if replace_ids else ""))
+        st.link_button("Abrir carpeta del carrusel en Google Drive", folder_url, use_container_width=True)
+        cols = st.columns(5)
+        for col, (name, data) in zip(cols, images):
+            with col:
+                st.image(data, caption=name, use_container_width=True)
+                st.download_button("Descargar", data=data, file_name=name, mime="image/png",
+                                   key=name, use_container_width=True)
+        st.download_button("⬇ Descargar las cinco imágenes (ZIP)", data=zip_data,
+                           file_name="carrusel_instagram.zip", mime="application/zip", type="primary",
+                           use_container_width=True)
+    except Exception as e:
+        status.update(label="No se pudo completar el proceso", state="error")
+        st.error(str(e))
+        if replace_ids:
+            st.info("El carrusel anterior no se modificó.")
+        st.info("Si el error ocurrió durante la generación, las láminas que ya se habían subido permanecen en Google Drive.")
+        st.info("Algunos sitios bloquean la extracción o requieren JavaScript, login o suscripción.")
+
 url = st.text_input("URL del artículo", placeholder="https://sitio.com/articulo")
+
+# Si se cambia la URL, se descarta la pregunta pendiente sobre la anterior.
+pending = st.session_state.get("pending")
+if pending and normalize_url(pending["url"]) != normalize_url(url or ""):
+    st.session_state.pop("pending", None)
+    pending = None
+
 if st.button("Generar carrusel", type="primary", use_container_width=True):
+    st.session_state.pop("pending", None)
+    pending = None
     key = api_key_from_secrets()
     if not key:
         st.error("Falta OPENAI_API_KEY en Streamlit Secrets.")
     elif not url.strip():
         st.error("Pega la URL del artículo.")
     else:
-        status = st.status("Iniciando proceso…", expanded=True)
         try:
             drive_service, drive_root_id = drive_service_from_secrets()
-            images, zip_data, folder_url = build(
-                url.strip(), key, status, drive_service, drive_root_id)
-            status.update(label="Carrusel terminado y guardado en Google Drive", state="complete", expanded=False)
-            st.success("Las cinco láminas ya están guardadas en Google Drive.")
-            st.link_button("Abrir carpeta del carrusel en Google Drive", folder_url, use_container_width=True)
-            cols = st.columns(5)
-            for col, (name, data) in zip(cols, images):
-                with col:
-                    st.image(data, caption=name, use_container_width=True)
-                    st.download_button("Descargar", data=data, file_name=name, mime="image/png",
-                                       key=name, use_container_width=True)
-            st.download_button("⬇ Descargar las cinco imágenes (ZIP)", data=zip_data,
-                               file_name="carrusel_instagram.zip", mime="application/zip", type="primary",
-                               use_container_width=True)
+            existing = find_existing_carousels(drive_service, drive_root_id, url)
         except Exception as e:
-            status.update(label="No se pudo completar el proceso", state="error")
+            existing = None
             st.error(str(e))
-            st.info("Si el error ocurrió durante la generación, las láminas que ya se habían subido permanecen en Google Drive.")
-            st.info("Algunos sitios bloquean la extracción o requieren JavaScript, login o suscripción.")
+        if existing:
+            st.session_state["pending"] = {"url": url.strip(), "existing": existing}
+            pending = st.session_state["pending"]
+        elif existing == []:
+            run_generation(url.strip(), key)
+
+if pending:
+    box = st.empty()
+    with box.container():
+        st.warning("Este artículo ya tiene un carrusel guardado en Drive. ¿Quieres sustituirlo por uno nuevo?")
+        for item in pending["existing"]:
+            link = item.get("webViewLink") or f"https://drive.google.com/drive/folders/{item['id']}"
+            st.markdown(f"- [{item['name']}]({link})")
+        c1, c2 = st.columns(2)
+        replace = c1.button("Sí, sustituir", type="primary", use_container_width=True)
+        cancel = c2.button("No, conservar el actual", use_container_width=True)
+    if replace:
+        st.session_state.pop("pending", None)
+        box.empty()
+        run_generation(pending["url"], api_key_from_secrets(),
+                       [item["id"] for item in pending["existing"]])
+    elif cancel:
+        st.session_state.pop("pending", None)
+        st.rerun()
 
 with st.expander("📁 Historial de carruseles guardados en Drive"):
     try:
