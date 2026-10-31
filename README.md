@@ -36,3 +36,13 @@ mientras la aplicación se use localmente.
 Algunos sitios bloquean la extracción o requieren JavaScript, login o suscripción.
 Cada carrusel genera cinco imágenes y consume créditos de OpenAI API. Antes de
 hacer pública la app, agrega autenticación y límites de uso.
+
+
+## Modelos internos
+
+La aplicación fija los modelos en `app.py` y no los muestra en la interfaz:
+- Texto: `gpt-4.1-mini`
+- Imágenes: `gpt-image-2`
+
+Si OpenAI cambia los identificadores o el acceso de tu proyecto, se actualizan
+directamente en las constantes `TEXT_MODEL` e `IMAGE_MODEL` del código.
