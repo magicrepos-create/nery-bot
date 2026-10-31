@@ -1,29 +1,28 @@
 # neryp_bot — Streamlit
 
-Aplicación web que convierte una URL de artículo en cinco imágenes editoriales
-para Instagram, 1080 × 1350 px (4:5), más un ZIP y copy sugerido.
+Aplicación que transforma una URL pública en cinco imágenes editoriales para
+Instagram (1080 × 1350 px, 4:5), además de un ZIP y copy sugerido.
 
 ## Instalar en Windows
 
 ```powershell
-cd ruta\a\neryp_bot
 python -m venv .venv
-.venv\Scripts\activate
+.venv\\Scripts\\activate
 pip install -r requirements.txt
 ```
 
-## Configurar API
+## API Key en Secrets (no en la interfaz)
 
-Copia `.env.example` a `.env` y agrega tu clave:
+**Local:** crea `.streamlit/secrets.toml`:
 
-```env
-OPENAI_API_KEY=tu_api_key
-OPENAI_TEXT_MODEL=gpt-4.1-mini
-OPENAI_IMAGE_MODEL=gpt-image-1
+```toml
+OPENAI_API_KEY = "tu_api_key"
 ```
 
-También puedes pegar la API Key en la barra lateral de la aplicación.
-Nunca subas `.env` a GitHub.
+**Streamlit Community Cloud:** App settings → Secrets y pega el mismo bloque TOML.
+
+No subas el archivo real `secrets.toml` a GitHub; `.gitignore` ya lo excluye.
+La aplicación no muestra ni solicita la clave en pantalla.
 
 ## Ejecutar
 
@@ -32,17 +31,8 @@ streamlit run app.py
 ```
 
 Abre normalmente http://localhost:8501. La computadora debe permanecer encendida
-y la aplicación activa para usarla localmente.
+mientras la aplicación se use localmente.
 
-## Publicar
-
-Puedes desplegarla en Streamlit Community Cloud conectando el repositorio privado
-si tu plan/flujo de despliegue lo permite, o en otro servidor compatible.
-En la nube guarda `OPENAI_API_KEY` como secreto, no en el repositorio.
-
-## Limitaciones
-
-Algunos sitios bloquean la extracción, requieren login o cargan texto con JavaScript.
-Cada carrusel genera cinco imágenes y consume créditos de API. Antes de hacer pública
-la app conviene añadir autenticación, cuotas por usuario, límites de gasto y controles
-adicionales de seguridad para las URLs.
+Algunos sitios bloquean la extracción o requieren JavaScript, login o suscripción.
+Cada carrusel genera cinco imágenes y consume créditos de OpenAI API. Antes de
+hacer pública la app, agrega autenticación y límites de uso.
