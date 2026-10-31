@@ -52,3 +52,15 @@ streamlit run app.py
 ```
 
 Los artículos deben ser públicos y accesibles. La generación requiere que la sesión siga activa; si se interrumpe, las imágenes que ya se hayan subido permanecen en Drive. Para que el trabajo continúe automáticamente tras un reinicio de Streamlit se necesitaría además un trabajador externo/cola de tareas.
+
+## Identidades gráficas por medio
+
+La aplicación identifica el medio por el dominio de la URL y selecciona una plantilla interna:
+
+- `eleconomista.com.mx`: paleta turquesa, azul marino y crema; titulares serif; símbolo de El Economista.
+- `mimorelia.com`: acentos naranja, fondos claros y tipografía sans serif; logotipo de MiMorelia.
+- Otros dominios: plantilla editorial neutra, sin logotipos de terceros.
+
+Los logotipos transparentes se encuentran en `assets/logos/`. Se conservaron también los archivos fuente proporcionados en esta conversación. El archivo de El Economista recibido contiene únicamente el símbolo; la composición actual acompaña el símbolo con el nombre tipográfico “EL ECONOMISTA”. Para utilizar el logotipo horizontal oficial completo, sustituirlo por un PNG/SVG oficial transparente.
+
+Las imágenes generadas por GPT Image 2 son fondos conceptuales sin texto ni logotipos. Los titulares, textos, numeración, firma y marcas se componen posteriormente con Pillow para evitar errores de escritura y alteraciones de marca. Todas las diapositivas se exportan a 1080 × 1350 px.
