@@ -25,7 +25,6 @@ IMAGE_MODEL = "gpt-image-2"
 IMAGE_SIZE = "1088x1360"
 FALLBACK_SIZE = "1024x1536"
 OUT_SIZE = (1080, 1350)
-MAX_ATTEMPTS = 2  # intentos por lámina si la revisión de texto encuentra errores
 
 TEXT_PROMPT = """
 Actúa como editor de contenidos digitales y director creativo especializado
@@ -77,18 +76,7 @@ LAYOUT, top to bottom, aligned to a generous left margin (about 8% of the width)
 - Image: {visual}. Photorealistic conceptual still life, realistic materials, soft natural editorial light, shallow depth of field. The image is part of the layout: it occupies the lower half and may extend up the right side, blending into a warm ivory background close to {paper}. Text sits on calm, uncluttered areas and stays perfectly legible.
 - Bottom-left footer, two lines in sans-serif: first line "{author}" in bold; second line "{footer2}" in regular weight.{no_author_note}
 Art direction: {visual_style}
-SPELLING IS CRITICAL: reproduce every word exactly as given, including Spanish accents (á é í ó ú ñ), opening and closing punctuation. Do not add, remove or translate words. No other text anywhere: no hashtags, no URLs, no watermark, no signature.
-{retry_note}"""
-
-VERIFY_PROMPT = """Eres corrector de pruebas de piezas gráficas. Recibes una imagen y el
-texto que debía aparecer en ella. Lee la imagen con cuidado y compara.
-Marca ok=false si en titular, cuerpo, firma o pie hay palabras mal escritas,
-acentos faltantes o incorrectos, palabras de más o de menos, letras deformes,
-o si aparece texto o logotipos que no se pidieron.
-Ignora saltos de línea, mayúsculas/minúsculas, el contador n/5, el logotipo
-del medio en la esquina superior derecha y rótulos cortos dentro de la
-ilustración. Devuelve solo JSON:
-{"ok": true|false, "problemas": ["descripción breve", ...]}"""
+SPELLING IS CRITICAL: reproduce every word exactly as given, including Spanish accents (á é í ó ú ñ), opening and closing punctuation. Do not add, remove or translate words. No other text anywhere: no hashtags, no URLs, no watermark, no signature."""
 
 BRAND_TEMPLATES = {
     "economista": {
@@ -269,7 +257,7 @@ def load_reference_images(brand):
                 refs.append((name, f.read(), mime))
     return refs
 
-def build_slide_prompt(slide, brand, refs, author, footer2, crop_mode, issues):
+def build_slide_prompt(slide, brand, refs, author, footer2, crop_mode):
     p = brand["palette"]
     refs_note = ""
     if refs:
@@ -286,7 +274,6 @@ def build_slide_prompt(slide, brand, refs, author, footer2, crop_mode, issues):
                       "the rest of the headline stays navy.") if slide.get("highlight") else ""
     safe_area = ("SAFE AREA: this image will be cropped to 4:5, so the top 9% and bottom 9% "
                  "must contain only background; keep all text, logo and the main subject outside those bands.") if crop_mode else ""
-    retry_note = ("A previous attempt had these errors, avoid them: " + "; ".join(issues)) if issues else ""
     return SLIDE_PROMPT.format(
         n=slide["number"], brand_name=brand["name"], refs_note=refs_note, safe_area=safe_area,
         logo_space=logo_space, headline_font=brand["headline_font"], body_font=brand["body_font"],
@@ -294,7 +281,7 @@ def build_slide_prompt(slide, brand, refs, author, footer2, crop_mode, issues):
         title=slide["title"], highlight_rule=highlight_rule, body=slide["body"],
         visual=slide["visual_direction"], author=author or brand["name"], footer2=footer2,
         no_author_note="" if author else " If no author is given, use a single footer line.",
-        visual_style=brand["visual_style"], retry_note=retry_note,
+        visual_style=brand["visual_style"],
     )
 
 def request_image(client, prompt, refs, size):
@@ -305,14 +292,14 @@ def request_image(client, prompt, refs, size):
         r = client.images.generate(model=IMAGE_MODEL, prompt=prompt, size=size, quality="high")
     return Image.open(io.BytesIO(base64.b64decode(r.data[0].b64_json))).convert("RGB")
 
-def generate_raw(client, slide, brand, refs, author, footer2, issues):
+def generate_raw(client, slide, brand, refs, author, footer2):
     try:
-        prompt = build_slide_prompt(slide, brand, refs, author, footer2, False, issues)
+        prompt = build_slide_prompt(slide, brand, refs, author, footer2, False)
         return request_image(client, prompt, refs, IMAGE_SIZE)
     except BadRequestError as e:
         if "size" not in str(e).lower():
             raise
-        prompt = build_slide_prompt(slide, brand, refs, author, footer2, True, issues)
+        prompt = build_slide_prompt(slide, brand, refs, author, footer2, True)
         return request_image(client, prompt, refs, FALLBACK_SIZE)
 
 def to_instagram(img):
@@ -349,14 +336,27 @@ def add_logo(img, brand, brand_key):
     im = img.convert("RGBA")
     logo = Image.open(logo_path).convert("RGBA")
     W = OUT_SIZE[0]
+    MARGIN_RIGHT, TOP = 60, 48
     if brand_key == "mimorelia":
         logo.thumbnail((390, 92), Image.Resampling.LANCZOS)
-        im.alpha_composite(logo, (W - logo.width - 78, 48))
+        im.alpha_composite(logo, (W - logo.width - MARGIN_RIGHT, TOP))
     elif brand_key == "economista":
         logo.thumbnail((76, 76), Image.Resampling.LANCZOS)
-        im.alpha_composite(logo, (W - 390, 48))
         d = ImageDraw.Draw(im)
-        d.text((W - 300, 60), "EL ECONOMISTA", font=font(43, True, "serif"),
+        text, gap, max_total = "EL ECONOMISTA", 16, 470
+        size = 43
+        fnt = font(size, True, "serif")
+        # Reduce la letra si el conjunto símbolo + texto no cabe en el ancho máximo.
+        while size > 24 and logo.width + gap + d.textlength(text, font=fnt) > max_total:
+            size -= 1
+            fnt = font(size, True, "serif")
+        text_w = d.textlength(text, font=fnt)
+        x0 = int(W - MARGIN_RIGHT - (logo.width + gap + text_w))
+        im.alpha_composite(logo, (x0, TOP))
+        # Centra el texto verticalmente respecto al símbolo.
+        bbox = d.textbbox((0, 0), text, font=fnt)
+        text_y = TOP + (logo.height - (bbox[3] - bbox[1])) // 2 - bbox[1]
+        d.text((x0 + logo.width + gap, text_y), text, font=fnt,
                fill=(*brand["palette"]["ink"], 255))
     return im.convert("RGB")
 
@@ -365,36 +365,10 @@ def png_bytes(img):
     img.save(buf, format="PNG", optimize=True)
     return buf.getvalue()
 
-def verify_slide(client, data, slide, author, footer2):
-    expected = {"titular": slide["title"], "cuerpo": slide["body"], "firma": author, "pie": footer2}
-    b64 = base64.b64encode(data).decode()
-    try:
-        r = client.chat.completions.create(
-            model=TEXT_MODEL, response_format={"type": "json_object"}, temperature=0,
-            messages=[
-                {"role": "system", "content": VERIFY_PROMPT},
-                {"role": "user", "content": [
-                    {"type": "text", "text": "Texto esperado:\n" + json.dumps(expected, ensure_ascii=False)},
-                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}", "detail": "high"}},
-                ]},
-            ])
-        res = json.loads(r.choices[0].message.content)
-        return bool(res.get("ok")), [str(x) for x in res.get("problemas", [])]
-    except Exception:
-        return True, []  # si la revisión falla, no bloquea la generación
-
-def make_slide(client, slide, brand, brand_key, refs, author, footer2, status):
-    issues = []
-    data = None
-    for attempt in range(1, MAX_ATTEMPTS + 1):
-        raw = generate_raw(client, slide, brand, refs, author, footer2, issues)
-        data = png_bytes(add_logo(to_instagram(raw), brand, brand_key))
-        ok, issues = verify_slide(client, data, slide, author, footer2)
-        if ok:
-            return data, []
-        if attempt < MAX_ATTEMPTS:
-            status.write(f"Lámina {slide['number']}: el texto salió con errores, regenerando…")
-    return data, issues
+def make_slide(client, slide, brand, brand_key, refs, author, footer2):
+    """Una sola generación por lámina (sin revisiones ni regeneraciones)."""
+    raw = generate_raw(client, slide, brand, refs, author, footer2)
+    return png_bytes(add_logo(to_instagram(raw), brand, brand_key))
 
 # ---------------------------------------------------------------- Flujo principal
 def build(url, key, status, drive_service, drive_root_id):
@@ -419,13 +393,11 @@ def build(url, key, status, drive_service, drive_root_id):
     folder_id = folder["id"]
     folder_url = folder.get("webViewLink") or f"https://drive.google.com/drive/folders/{folder_id}"
 
-    images, warnings = [], []
+    images = []
     for i, slide in enumerate(plan["slides"], 1):
         status.write(f"Generando lámina {i} de 5…")
-        data, issues = make_slide(client, slide, brand, brand_key, refs, author, footer2, status)
+        data = make_slide(client, slide, brand, brand_key, refs, author, footer2)
         name = f"lamina_{i:02d}.png"
-        if issues:
-            warnings.append(f"{name}: " + "; ".join(issues))
         status.write(f"Guardando {name} en Google Drive…")
         upload_drive_bytes(drive_service, folder_id, name, data, "image/png")
         images.append((name, data))
@@ -435,7 +407,7 @@ def build(url, key, status, drive_service, drive_root_id):
         for name, data in images:
             z.writestr(name, data)
     zip_data = zipped.getvalue()
-    return images, zip_data, folder_url, warnings
+    return images, zip_data, folder_url
 
 # ---------------------------------------------------------------- Interfaz
 col_logo, col_title = st.columns([1, 4])
@@ -459,13 +431,11 @@ if st.button("Generar carrusel", type="primary", use_container_width=True):
         status = st.status("Iniciando proceso…", expanded=True)
         try:
             drive_service, drive_root_id = drive_service_from_secrets()
-            images, zip_data, folder_url, warnings = build(
+            images, zip_data, folder_url = build(
                 url.strip(), key, status, drive_service, drive_root_id)
             status.update(label="Carrusel terminado y guardado en Google Drive", state="complete", expanded=False)
             st.success("Las cinco láminas ya están guardadas en Google Drive.")
             st.link_button("Abrir carpeta del carrusel en Google Drive", folder_url, use_container_width=True)
-            for w in warnings:
-                st.warning("Revisa el texto de " + w)
             cols = st.columns(5)
             for col, (name, data) in zip(cols, images):
                 with col:
