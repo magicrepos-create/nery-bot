@@ -13,7 +13,7 @@ from googleapiclient.discovery import build as google_build
 from googleapiclient.http import MediaIoBaseUpload
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-st.set_page_config(page_title="neryp_bot", page_icon="📰", layout="wide")
+st.set_page_config(page_title="Nery Bot", page_icon="📰", layout="wide")
 
 # Modelos internos: no se muestran ni se configuran desde la interfaz.
 TEXT_MODEL = "gpt-4.1-mini"
@@ -318,9 +318,18 @@ def build(url, key, status, drive_service, drive_root_id):
     upload_drive_bytes(drive_service,folder_id,"carrusel_completo.zip",zip_data,"application/zip")
     return article,plan,images,zip_data,folder_url,brand
 
-st.title("📰 neryp_bot")
-st.subheader("Generador de carruseles editoriales para Instagram")
-st.write("Pega la URL de un artículo y genera cinco imágenes listas para publicar.")
+col_logo, col_title = st.columns([1, 4])
+
+with col_logo:
+    st.image(
+        "assets/branding/nery_bot_cartoon.png",
+        width=130
+    )
+
+with col_title:
+    st.title("Nery Bot")
+    st.subheader("Generador de carruseles editoriales para Instagram")
+    st.write("Pega la URL de un artículo y genera cinco imágenes listas para publicar.")
 
 with st.sidebar:
     st.header("Formato de salida")
