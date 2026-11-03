@@ -116,6 +116,9 @@ BRAND_TEMPLATES = {
 }
 
 
+# Los documentos siempre son columnas de opinión del mismo autor.
+AUTOR_DOCUMENTO = "José Nery Pérez Trujillo"
+
 # Medios que se pueden elegir cuando el artículo se sube como documento.
 MEDIOS_DOCUMENTO = {"El Economista": "economista", "MiMorelia": "mimorelia"}
 
@@ -493,7 +496,7 @@ def build(source, key, status, bar, drive_service, drive_root_id):
         status.write(f"Leyendo el documento {source['filename']} para {brand['name']}…")
         advance(3, "Leyendo el documento")
         article = read_document(source["filename"], source["data"], brand)
-        section = "Opinión" if source.get("opinion") else ""
+        section = "Opinión"
     status.write(f"Analizando el artículo y preparando la narrativa…")
     advance(6, "Preparando la narrativa")
     plan = plan_article(client, article, brand)
@@ -501,8 +504,7 @@ def build(source, key, status, bar, drive_service, drive_root_id):
     if source["kind"] == "url":
         author = (article.get("author") or "").strip()
     else:
-        # Autor escrito en la app; si no, la firma que aparezca en el documento.
-        author = (source.get("author") or plan.get("author") or "").strip()
+        author = AUTOR_DOCUMENTO
     medio = brand["name"] if brand_key != "default" else (article.get("site_name") or "")
     footer2 = " | ".join(x for x in (section, medio) if x)
     refs = load_reference_images(brand)
@@ -593,13 +595,10 @@ if modo == "URL del artículo":
 else:
     uploaded = st.file_uploader("Documento del artículo", type=["pdf", "docx"])
     medio = st.selectbox("¿Para qué medio es el carrusel?", list(MEDIOS_DOCUMENTO))
-    c_autor, c_opinion = st.columns([3, 1], vertical_alignment="bottom")
-    autor = c_autor.text_input("Autor (opcional)",
-        help="Si lo dejas vacío se usa la firma que aparezca en el documento; si no hay, el nombre del medio.")
-    opinion = c_opinion.checkbox("Es columna de opinión")
+    st.caption(f"Autor: {AUTOR_DOCUMENTO} · Sección: Opinión")
     if uploaded is not None:
         source = {"kind": "file", "filename": uploaded.name, "data": uploaded.getvalue(),
-                  "brand_key": MEDIOS_DOCUMENTO[medio], "author": autor.strip(), "opinion": opinion}
+                  "brand_key": MEDIOS_DOCUMENTO[medio]}
 
 # Si cambia la URL, el documento o el medio, se descarta la pregunta pendiente sobre el anterior.
 pending = st.session_state.get("pending")
